@@ -1,6 +1,4 @@
 
-############## Don't change setup ##############
-
 import sys
 sys.path.insert(0, "cactus/python/src")
 functiongemma_path = "cactus/weights/functiongemma-270m-it"
@@ -12,8 +10,6 @@ from cactus import cactus_init, cactus_complete, cactus_destroy
 from google import genai
 from google.genai import types
 
-
-############## Helper functions ##############
 
 def generate_cactus(messages, tools):
     """Run function calling on-device via FunctionGemma + Cactus."""
