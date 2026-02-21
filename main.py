@@ -4,7 +4,7 @@ sys.path.insert(0, "cactus/python/src")
 functiongemma_path = "cactus/weights/functiongemma-270m-it"
 
 import json, os, re, time
-from cactus import cactus_init, cactus_complete, cactus_destroy
+from cactus import cactus_init, cactus_complete, cactus_destroy, cactus_reset
 from google import genai
 from google.genai import types
 
@@ -43,6 +43,7 @@ def generate_cactus(
     :returns: Parsed local model result.
     """
     model = get_cached_model()
+    cactus_reset(model)
 
     cactus_tools = [{
         "type": "function",
@@ -175,10 +176,14 @@ _LOCAL_DEFAULT_TEMPERATURE = 0.10
 _LOCAL_DEFAULT_TOP_P = 0.95
 _LOCAL_DEFAULT_TOP_K = 40
 _LOCAL_DEFAULT_CONFIDENCE_THRESHOLD = 0.68
-_LOCAL_SINGLE_INTENT_TOOL_CAP = 5
+_LOCAL_SINGLE_INTENT_TOOL_CAP = 8
 _LOCAL_SINGLE_INTENT_TOOL_RAG_TOP_K = 3
 _CLOUD_ACCEPT_MARGIN_DEFAULT = 0.75
 _CLOUD_ACCEPT_MARGIN_MULTI_TURN_CAP = 0.35
+_LOCAL_SINGLE_INTENT_TRIM_MIN_TOP_SCORE = 4.5
+_LOCAL_SINGLE_INTENT_TRIM_MIN_GAP = 2.0
+_RULE_OVERRIDE_MAX_LOCAL_CONFIDENCE = 0.78
+_RULE_OVERRIDE_MIN_SCORE_MARGIN = 1.0
 
 
 def _stem_token(token):
@@ -286,7 +291,26 @@ def _rank_tools_for_query(user_text, tools):
     return [tool for _, _, tool in scored]
 
 
-def _select_prepared_tools(ranked_tools, intent_count, force_full_coverage=False):
+def _is_strong_single_intent_ranking(ranked_tools, user_text):
+    """Check whether single-intent ranking is clear enough to prune tools.
+
+    :param ranked_tools: Relevance-ranked tools.
+    :param user_text: Aggregated user text.
+    :returns: ``True`` if top tool is clearly above alternatives.
+    """
+    if not ranked_tools:
+        return False
+    if len(ranked_tools) == 1:
+        return True
+    top_score = _tool_semantic_score(ranked_tools[0], user_text)
+    second_score = _tool_semantic_score(ranked_tools[1], user_text)
+    return (
+        top_score >= _LOCAL_SINGLE_INTENT_TRIM_MIN_TOP_SCORE
+        and (top_score - second_score) >= _LOCAL_SINGLE_INTENT_TRIM_MIN_GAP
+    )
+
+
+def _select_prepared_tools(ranked_tools, intent_count, user_text="", force_full_coverage=False):
     """Select a tool subset for local generation.
 
     For likely single-intent requests, this trims low-relevance tools to
@@ -294,6 +318,7 @@ def _select_prepared_tools(ranked_tools, intent_count, force_full_coverage=False
 
     :param ranked_tools: Relevance-ranked tools.
     :param intent_count: Estimated number of requested intents.
+    :param user_text: Aggregated user text for ambiguity checks.
     :param force_full_coverage: Whether to keep all tools for complex requests.
     :returns: Selected tool list for generation.
     """
@@ -301,6 +326,9 @@ def _select_prepared_tools(ranked_tools, intent_count, force_full_coverage=False
         return ranked_tools
 
     if intent_count <= 1:
+        if not _is_strong_single_intent_ranking(ranked_tools, user_text):
+            # Ambiguous single-intent query: keep full tool set to avoid over-pruning.
+            return ranked_tools
         cap = _LOCAL_SINGLE_INTENT_TOOL_CAP
         cap = max(1, min(cap, len(ranked_tools)))
         return ranked_tools[:cap]
@@ -344,9 +372,11 @@ def _prepare_local_input(messages, tools):
     user_turns = _user_turn_count(messages)
     complex_request = user_turns > 1 or len(tools) >= 6 or intent_count >= 3
     ranked_tools = _rank_tools_for_query(user_text, tools)
+    single_intent_ranking_is_strong = _is_strong_single_intent_ranking(ranked_tools, user_text)
     prepared_tools = _select_prepared_tools(
         ranked_tools,
         intent_count,
+        user_text=user_text,
         force_full_coverage=complex_request,
     )
 
@@ -361,7 +391,7 @@ def _prepare_local_input(messages, tools):
         tool_rag_top_k = 0
     elif complex_request:
         tool_rag_top_k = 0
-    elif intent_count <= 1:
+    elif intent_count <= 1 and single_intent_ranking_is_strong and len(prepared_tools) < len(tools):
         tool_rag_top_k = min(single_intent_rag_top_k, len(prepared_tools))
     else:
         tool_rag_top_k = 0
@@ -928,7 +958,24 @@ def _should_replace_argument(call_name, arg_name, current_value, inferred_value,
     if arg_name in {"message", "title", "location", "query", "recipient", "song"}:
         current_norm = _clean_text_value(str(current_value)).lower()
         inferred_norm = _clean_text_value(str(inferred_value)).lower()
-        return current_norm != inferred_norm
+        if current_norm == inferred_norm:
+            return False
+        if not current_norm:
+            return True
+        if current_norm in {"him", "her", "them", "it", "that", "this"}:
+            return True
+        user_norm = user_text.lower()
+        # Replace overly long/bleeding spans in multi-intent requests.
+        if any(token in current_norm for token in (" and ", " then ", ",", ";")):
+            if inferred_norm and inferred_norm in current_norm and len(current_norm) > len(inferred_norm) + 6:
+                return True
+        # Prefer the inferred value only when the existing value clearly does not
+        # come from the user text while inferred does.
+        if current_norm in user_norm:
+            return False
+        if inferred_norm in user_norm and current_norm not in user_norm:
+            return len(inferred_norm.split()) >= 2 or len(inferred_norm) >= 4
+        return False
 
     return False
 
@@ -1061,6 +1108,9 @@ def _normalize_calls(raw_calls, tool_index, user_text):
         name = call.get("name")
         arguments = call.get("arguments", {})
         if name in tool_index and isinstance(arguments, dict):
+            required = tool_index[name]["required"]
+            if any(req not in arguments for req in required):
+                continue
             key = (name, json.dumps(arguments, sort_keys=True))
             if key in seen:
                 continue
