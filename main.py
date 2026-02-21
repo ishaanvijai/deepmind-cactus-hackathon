@@ -8,6 +8,15 @@ from cactus import cactus_init, cactus_complete, cactus_destroy
 from google import genai
 from google.genai import types
 
+_CACHED_MODEL = None
+
+def get_cached_model():
+    """Lazily initialize and global cache the given model."""
+    global _CACHED_MODEL
+    if _CACHED_MODEL is None:
+        _CACHED_MODEL = cactus_init(functiongemma_path)
+    return _CACHED_MODEL
+
 
 def generate_cactus(
     messages,
@@ -33,7 +42,7 @@ def generate_cactus(
     :param local_confidence_threshold: Local confidence threshold for cloud_handoff signaling.
     :returns: Parsed local model result.
     """
-    model = cactus_init(functiongemma_path)
+    model = get_cached_model()
 
     cactus_tools = [{
         "type": "function",
@@ -74,8 +83,6 @@ def generate_cactus(
         confidence_threshold=effective_local_conf_threshold,
     )
 
-    cactus_destroy(model)
-
     raw = _parse_cactus_output(raw_str)
 
     return {
@@ -86,9 +93,18 @@ def generate_cactus(
     }
 
 
+_CACHED_GENAI_CLIENT = None
+
+def get_cached_genai_client():
+    global _CACHED_GENAI_CLIENT
+    if _CACHED_GENAI_CLIENT is None:
+        _CACHED_GENAI_CLIENT = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+    return _CACHED_GENAI_CLIENT
+
+
 def generate_cloud(messages, tools):
     """Run function calling via Gemini Cloud API."""
-    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+    client = get_cached_genai_client()
 
     gemini_tools = [
         types.Tool(function_declarations=[
@@ -1248,6 +1264,8 @@ def _should_try_cloud_fallback(
     :returns: ``True`` when cloud retry is likely beneficial.
     """
     if local_cloud_handoff:
+        return True
+    if tool_count >= 4:
         return True
     if not local_calls:
         return True
