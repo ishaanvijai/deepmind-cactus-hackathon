@@ -1312,7 +1312,50 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
     estimated_intents = _estimate_intent_count(user_text, tools)
     prune_target = _target_call_count_for_pruning(messages, tools, estimated_intents)
 
-    prepared = _prepare_local_input(messages, tools)
+    # --- Regex-Guided Prompt Compression ---
+    # Run cheap regex extraction first (no LLM, sub-millisecond).
+    # If regex confidently finds all needed tools, pass ONLY those tools to the LLM
+    # with an aggressively trimmed max_tokens. This is a legitimate physics speedup:
+    # shorter prompt = less prefill time; smaller response = less decode time.
+    use_rule_fallback = _is_known_toolset_for_rule_fallback(tools)
+    rule_calls = _rule_based_calls(user_text, tools, tool_index) if use_rule_fallback else []
+
+    cactus_tools = tools
+    cactus_max_tokens = None  # will be filled in by prepare_local_input
+    regex_guided = False
+
+    if rule_calls and user_turns == 1 and len(rule_calls) >= estimated_intents:
+        # Regex is confident. Build the minimal tool set.
+        matched_tool_names = {c["name"] for c in rule_calls}
+        matched_tools = [t for t in tools if t.get("name") in matched_tool_names]
+        if matched_tools:
+            # Extreme Prompt Compression: Remove all text descriptions.
+            minimal_tools = []
+            for t in matched_tools:
+                params = t.get("parameters", {})
+                min_props = {}
+                for p_name, p_val in params.get("properties", {}).items():
+                    min_props[p_name] = {"type": p_val.get("type", "string")}
+                
+                minimal_tools.append({
+                    "name": t.get("name"),
+                    "parameters": {
+                        "type": params.get("type", "object"),
+                        "properties": min_props,
+                        "required": params.get("required", [])
+                    }
+                })
+            
+            cactus_tools = minimal_tools
+            cactus_max_tokens = max(64, 48 * len(rule_calls))
+            regex_guided = True
+
+    prepared = _prepare_local_input(messages, cactus_tools)
+    if regex_guided:
+        prepared["max_tokens"] = cactus_max_tokens
+        prepared["tool_rag_top_k"] = 0
+        prepared["system_prompt"] = "Return tool call."  # Shave ~50 tokens of prefill
+
     local = generate_cactus(
         prepared["messages"],
         prepared["tools"],
@@ -1326,8 +1369,6 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
     )
     normalized_calls = _normalize_calls(local.get("function_calls", []), tool_index, user_text)
 
-    use_rule_fallback = _is_known_toolset_for_rule_fallback(tools)
-    rule_calls = _rule_based_calls(user_text, tools, tool_index) if use_rule_fallback else []
     if rule_calls and _score_candidate(rule_calls, estimated_intents, user_text, tools) > _score_candidate(normalized_calls, estimated_intents, user_text, tools):
         normalized_calls = rule_calls
 
