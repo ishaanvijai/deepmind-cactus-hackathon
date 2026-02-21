@@ -4,7 +4,8 @@ os.environ["CACTUS_NO_CLOUD_TELE"] = "1"
 
 import json
 import random
-from benchmark import run_benchmark, compute_total_score
+import argparse
+from benchmark import run_benchmark
 
 
 def convert_tools(berkeley_functions):
@@ -18,8 +19,10 @@ def convert_tools(berkeley_functions):
             ptype = prop_def.get("type", "string")
             if ptype == "float":
                 ptype = "number"
-            elif ptype == "array":
-                ptype = "string"
+            elif ptype in ("int", "integer"):
+                ptype = "integer"
+            elif ptype in ("bool", "boolean"):
+                ptype = "boolean"
             clean["type"] = ptype
             if "description" in prop_def:
                 clean["description"] = prop_def["description"]
@@ -95,6 +98,34 @@ def make_stub_tools(path_names):
     return tools
 
 
+def build_messages(entry, entry_type):
+    """Build benchmark messages from Berkeley question format.
+
+    For multi_turn entries, merge all turns to provide full context for
+    long path expectations. For other entry types, use the first variant.
+    """
+    questions = entry.get("question", [])
+    if not questions:
+        return []
+
+    if entry_type == "multi_turn":
+        merged = []
+        for turn in questions:
+            if isinstance(turn, list):
+                merged.extend(m for m in turn if isinstance(m, dict))
+            elif isinstance(turn, dict):
+                merged.append(turn)
+        if merged:
+            return merged
+
+    first = questions[0]
+    if isinstance(first, list):
+        return [m for m in first if isinstance(m, dict)]
+    if isinstance(first, dict):
+        return [first]
+    return []
+
+
 def load_berkeley_benchmarks(filepath):
     """Load Berkeley benchmark entries from NDJSON and convert to our format."""
     benchmarks = []
@@ -107,7 +138,7 @@ def load_berkeley_benchmarks(filepath):
             entry_id = entry["id"]
             entry_type = get_entry_type(entry_id)
 
-            messages = entry["question"][0]
+            messages = build_messages(entry, entry_type)
 
             if "function" in entry:
                 tools = convert_tools(entry["function"])
@@ -129,10 +160,14 @@ def load_berkeley_benchmarks(filepath):
 
 def sample_benchmarks(benchmarks, n=25):
     """Pick a stratified random subset of n benchmarks, preserving difficulty distribution."""
+    if n <= 0 or n >= len(benchmarks):
+        return list(benchmarks)
+
     by_difficulty = {}
     for b in benchmarks:
         by_difficulty.setdefault(b["difficulty"], []).append(b)
 
+    rng = random.Random(42)
     total = len(benchmarks)
     sampled = []
     remaining = n
@@ -144,15 +179,23 @@ def sample_benchmarks(benchmarks, n=25):
         else:
             count = max(1, round(n * len(pool) / total))
             count = min(count, len(pool), remaining)
-        sampled.extend(random.sample(pool, min(count, len(pool))))
+        sampled.extend(rng.sample(pool, min(count, len(pool))))
         remaining -= min(count, len(pool))
 
-    random.shuffle(sampled)
+    rng.shuffle(sampled)
     return sampled
 
 
 if __name__ == "__main__":
-    all_benchmarks = load_berkeley_benchmarks("largertest.json")
-    benchmarks = sample_benchmarks(all_benchmarks, 25)
-    print(f"Sampled {len(benchmarks)} / {len(all_benchmarks)} Berkeley benchmark cases\n")
+    parser = argparse.ArgumentParser(description="Run Berkeley benchmark conversion")
+    parser.add_argument("--file", default="largertest.json", help="Path to NDJSON benchmark file")
+    parser.add_argument("--sample", type=int, default=0, help="Stratified sample size (0 = run all)")
+    args = parser.parse_args()
+
+    all_benchmarks = load_berkeley_benchmarks(args.file)
+    benchmarks = sample_benchmarks(all_benchmarks, args.sample) if args.sample else all_benchmarks
+    if args.sample:
+        print(f"Sampled {len(benchmarks)} / {len(all_benchmarks)} Berkeley benchmark cases\n")
+    else:
+        print(f"Running all {len(benchmarks)} Berkeley benchmark cases\n")
     run_benchmark(benchmarks)
