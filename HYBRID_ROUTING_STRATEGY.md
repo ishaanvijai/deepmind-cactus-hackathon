@@ -6,7 +6,7 @@ Our current strategy maximizes on-device inference (`100%`) while authentically 
 
 Instead of artificially bypassing the local LLM for score-hacking, we use extremely fast heuristics to instantly predict the needed tools. When confident, we aggressively strip the physical prompt context sent to the local LLM—removing unneeded tools, removing all parameter text descriptions, and minimizing the core system prompt. This drastically slashes memory prefill and decode time, granting an authentic ultra-low latency response while satisfying the complete on-device benchmark requirement.
 
-## End-to-End Flow
+## Pipeline TLDR
 
 1. **Global Caching:** 
    - Load the local Cactus model and Gemini cloud client into global singletons to avoid repeated SDK initialization overhead on every request.

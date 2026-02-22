@@ -342,7 +342,7 @@ def run_cloud_narration(prompt: str, tool_results: str = "") -> str:
     game_state["history"].append({"role": "user", "content": user_content})
 
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         contents=[
             {"role": "user", "parts": [{"text": system}]},
         ] + [
@@ -401,7 +401,7 @@ Rules:
 - Return ONLY the JSON object, no markdown, no explanation."""
 
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         contents=schema_prompt,
     )
 
